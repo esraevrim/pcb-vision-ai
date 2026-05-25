@@ -1,4 +1,19 @@
-import React, { useState } from 'react';
+/**
+ * StatisticsScreen.tsx
+ *
+ * Integrates dashboard_widget.py into the existing React Native UI.
+ * Mirrors DashboardWidget layout:
+ *   ├── RangeSelector   (QComboBox → Today / This Week / This Month)
+ *   ├── Metric Cards    (MetricCard × 4)
+ *   ├── WeeklyTrendChart (line chart — scanned vs faulty)
+ *   ├── DefectPieChart   (pie chart — defect distribution)
+ *   ├── Daily Bar Chart  (existing DefectChart)
+ *   └── DetectionLogTable (log table with severity colors)
+ *
+ * Auto-refresh every 5 seconds — mirrors QTimer(5000) in DashboardWidget.
+ */
+
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,131 +23,136 @@ import {
   TouchableOpacity,
   TextInput,
   Dimensions,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LineChart } from 'react-native-chart-kit';
 import {
   Search,
-  Filter,
-  Calendar,
-  BarChart2,
-  TrendingDown,
   RefreshCw,
+  Scan,
+  AlertTriangle,
+  TrendingDown,
+  Zap,
+  Activity,
+  Database,
+  BarChart3,
+  Clock,
 } from 'lucide-react-native';
 import { Colors } from '../constants/colors';
-import { useStatsStore } from '../store/useStatsStore';
-import { KPICard } from '../components/stats/KPICard';
-import { DefectChart } from '../components/stats/DefectChart';
-import { ProductionLogTable } from '../components/stats/ProductionLogTable';
-import { Badge } from '../components/ui/Badge';
-import {
-  MOCK_KPI_DATA,
-  MOCK_LINE_CHART_DATA,
-  MOCK_DEFECT_DISTRIBUTION,
-} from '../mock/statistics';
-import { MOCK_PRODUCTION_LOGS } from '../mock/detections';
-import { CHART_CONFIG } from '../constants/config';
+import { useDatabaseStore } from '../store/useDatabaseStore';
+import { useStatsStore }    from '../store/useStatsStore';
+import { RangeSelector }       from '../components/stats/RangeSelector';
+import { DashboardMetricCard } from '../components/stats/DashboardMetricCard';
+import { WeeklyTrendChart }    from '../components/stats/WeeklyTrendChart';
+import { DefectPieChart }      from '../components/stats/DefectPieChart';
+import { DetectionLogTable }   from '../components/stats/DetectionLogTable';
+import { DefectChart }         from '../components/stats/DefectChart';
+import { Badge }               from '../components/ui/Badge';
+import { CHART_CONFIG }        from '../constants/config';
+import { MOCK_LINE_CHART_DATA, MOCK_DEFECT_DISTRIBUTION } from '../mock/statistics';
+import type { DateRange }      from '../types/database';
 
 const { width: SW } = Dimensions.get('window');
 
-const DATE_RANGES = ['7d', '30d', '90d'] as const;
-type DateRange = (typeof DATE_RANGES)[number];
-
-const DefectBarEntry = ({ name, count, total, color }: { name: string; count: number; total: number; color: string }) => {
-  const pct = total > 0 ? (count / total) * 100 : 0;
-  return (
-    <View style={barStyles.row}>
-      <View style={barStyles.labelWrap}>
-        <View style={[barStyles.dot, { backgroundColor: color }]} />
-        <Text style={barStyles.name} numberOfLines={1}>{name}</Text>
-        <Text style={[barStyles.count, { color }]}>{count}</Text>
-      </View>
-      <View style={barStyles.track}>
-        <View style={[barStyles.fill, { width: `${pct}%`, backgroundColor: color }]} />
-      </View>
-    </View>
-  );
-};
-
-const barStyles = StyleSheet.create({
-  row: { marginBottom: 10 },
-  labelWrap: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  name: { flex: 1, fontSize: 12, color: Colors.textSecondary },
-  count: { fontSize: 12, fontWeight: '700' },
-  track: { height: 6, backgroundColor: Colors.bgSurface, borderRadius: 3, overflow: 'hidden' },
-  fill: { height: '100%', borderRadius: 3 },
-});
+// Mirrors DashboardWidget.refresh_metrics() range logic
+function useRangeMetrics(range: DateRange, db: ReturnType<typeof useDatabaseStore.getState>) {
+  switch (range) {
+    case 'today':
+      return {
+        scanned:  db.dailyStats.totalScanned,
+        faulty:   db.dailyStats.totalFaulty,
+        rate:     db.dailyStats.defectRate,
+        avgMs:    db.dailyStats.avgInferenceMs,
+      };
+    case 'month':
+      return {
+        scanned:  db.monthlySummary.totalScanned,
+        faulty:   db.monthlySummary.totalFaulty,
+        rate:     db.monthlySummary.defectRate,
+        avgMs:    0,
+      };
+    case 'week':
+    default:
+      return {
+        scanned:  db.weeklyStats.totalScanned,
+        faulty:   db.weeklyStats.totalFaulty,
+        rate:     db.weeklyStats.avgDefectRate,
+        avgMs:    db.weeklyStats.avgInferenceMs,
+      };
+  }
+}
 
 export default function StatisticsScreen() {
-  const { dateRange, searchQuery, setDateRange, setSearchQuery, isLoading, refreshData } = useStatsStore();
-  const [activeRange, setActiveRange] = useState<DateRange>('7d');
+  const dbStore   = useDatabaseStore();
+  const statsStore = useStatsStore();
 
-  const handleRangeChange = (r: DateRange) => {
-    setActiveRange(r);
-    setDateRange(r);
-    refreshData();
-  };
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const filteredLogs = MOCK_PRODUCTION_LOGS.filter(
+  // Mirror DashboardWidget auto-refresh (QTimer interval: 5000ms)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      dbStore.refreshAll();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const onRefresh = useCallback(() => {
+    dbStore.refreshAll();
+    statsStore.refreshData();
+  }, [dbStore, statsStore]);
+
+  const metrics = useRangeMetrics(dbStore.selectedRange, dbStore);
+
+  const rateColor = metrics.rate > 15
+    ? Colors.danger
+    : metrics.rate > 10
+    ? Colors.warning
+    : Colors.success;
+
+  const rateSubtitle = metrics.rate > 10 ? 'Above target threshold' : 'Within target ✓';
+
+  // Filter detection log by search
+  const filteredLogs = dbStore.recentLogs.filter(
     (l) =>
       searchQuery === '' ||
-      l.pcbId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      l.status.toLowerCase().includes(searchQuery.toLowerCase())
+      l.defectType.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      l.timestamp.includes(searchQuery),
   );
-
-  const totalDefects = MOCK_DEFECT_DISTRIBUTION.reduce((s, d) => s + d.count, 0);
-
-  const defectBarData = MOCK_DEFECT_DISTRIBUTION.map((d) => ({
-    name: d.name,
-    count: d.count,
-    total: totalDefects,
-    color: d.color,
-  }));
 
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" backgroundColor={Colors.bgSurface} />
 
-      {/* Header */}
+      {/* ── Header ──────────────────────────────────────────────────── */}
       <SafeAreaView edges={['top']} style={styles.header}>
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.screenTitle}>Analytics & Reports</Text>
-            <Text style={styles.screenSub}>Production performance overview</Text>
+            <Text style={styles.screenSub}>PCB Defect Detection Dashboard</Text>
           </View>
-          <TouchableOpacity style={styles.refreshBtn} onPress={refreshData} activeOpacity={0.7}>
-            <RefreshCw size={16} color={isLoading ? Colors.accent : Colors.textSecondary} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Date range filter */}
-        <View style={styles.filterRow}>
-          <View style={styles.dateRangePicker}>
-            {DATE_RANGES.map((r) => (
-              <TouchableOpacity
-                key={r}
-                style={[styles.rangeBtn, activeRange === r && styles.rangeBtnActive]}
-                onPress={() => handleRangeChange(r)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.rangeBtnText, activeRange === r && styles.rangeBtnTextActive]}>
-                  {r}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <View style={styles.filterIconBtn}>
-            <Calendar size={16} color={Colors.textSecondary} />
+          <View style={styles.headerRight}>
+            <Badge label="● LIVE" color={Colors.success} />
+            <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh} activeOpacity={0.7}>
+              <RefreshCw
+                size={15}
+                color={dbStore.isRefreshing ? Colors.accent : Colors.textSecondary}
+              />
+            </TouchableOpacity>
           </View>
         </View>
 
-        {/* Search */}
+        {/* Range selector — mirrors QComboBox in DashboardWidget */}
+        <View style={styles.rangeRow}>
+          <RangeSelector selected={dbStore.selectedRange} onChange={dbStore.setRange} />
+        </View>
+
+        {/* Search bar */}
         <View style={styles.searchRow}>
-          <Search size={16} color={Colors.textMuted} style={styles.searchIcon} />
+          <Search size={14} color={Colors.textMuted} />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search PCB ID or status…"
+            placeholder="Search defect type or timestamp…"
             placeholderTextColor={Colors.textMuted}
             value={searchQuery}
             onChangeText={setSearchQuery}
@@ -140,68 +160,113 @@ export default function StatisticsScreen() {
         </View>
       </SafeAreaView>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-
-        {/* KPI Cards grid */}
-        <View style={styles.kpiGrid}>
-          {MOCK_KPI_DATA.map((kpi) => (
-            <KPICard key={kpi.label} data={kpi} />
-          ))}
+      <ScrollView
+        style={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={dbStore.isRefreshing}
+            onRefresh={onRefresh}
+            tintColor={Colors.accent}
+          />
+        }
+      >
+        {/* ── SECTION: System Metrics ─────────────────────────────── */}
+        {/* Mirrors 4 MetricCard widgets in DashboardWidget._build_ui() */}
+        <View style={styles.sectionHeader}>
+          <Database size={13} color={Colors.accent} />
+          <Text style={styles.sectionTitle}>SYSTEM METRICS</Text>
+          <Text style={styles.sectionSub}>via database.py service layer</Text>
         </View>
 
-        {/* Daily Detections Line Chart */}
-        <View style={styles.chartSection}>
-          <View style={styles.chartHeader}>
-            <Text style={styles.chartTitle}>DAILY DEFECT TREND</Text>
-            <Badge label="7-DAY" color={Colors.accent} size="sm" />
-          </View>
-          <LineChart
-            data={MOCK_LINE_CHART_DATA}
-            width={SW - 32}
-            height={180}
-            chartConfig={CHART_CONFIG}
-            bezier
-            style={styles.lineChart}
-            withShadow={false}
+        <View style={styles.metricsGrid}>
+          <DashboardMetricCard
+            icon={<Scan size={14} color={Colors.accent} />}
+            label="Total Scanned"
+            value={metrics.scanned.toLocaleString()}
+            style={styles.metricCard}
+          />
+          <DashboardMetricCard
+            icon={<AlertTriangle size={14} color={Colors.danger} />}
+            label="Faulty PCBs"
+            value={metrics.faulty.toLocaleString()}
+            valueColor={Colors.danger}
+            style={styles.metricCard}
+          />
+          <DashboardMetricCard
+            icon={<Activity size={14} color={rateColor} />}
+            label="Defect Rate"
+            value={`${metrics.rate.toFixed(1)}%`}
+            valueColor={rateColor}
+            subtitle={rateSubtitle}
+            style={styles.metricCard}
+          />
+          <DashboardMetricCard
+            icon={<Zap size={14} color={Colors.warning} />}
+            label="Avg Inference"
+            value={metrics.avgMs > 0 ? `${metrics.avgMs.toFixed(1)} ms` : '—'}
+            valueColor={Colors.warning}
+            style={styles.metricCard}
           />
         </View>
 
-        {/* Defect Distribution Bars */}
-        <View style={styles.sectionCard}>
-          <View style={styles.chartHeader}>
-            <Text style={styles.chartTitle}>DEFECT DISTRIBUTION</Text>
-            <Text style={styles.totalCount}>{totalDefects} total</Text>
-          </View>
-          {defectBarData.map((d) => (
-            <DefectBarEntry key={d.name} {...d} />
-          ))}
+        {/* ── SECTION: Weekly Trend ───────────────────────────────── */}
+        {/* Mirrors _refresh_line_chart() — scanned vs faulty, 4 weeks */}
+        <View style={styles.sectionHeader}>
+          <BarChart3 size={13} color={Colors.accent} />
+          <Text style={styles.sectionTitle}>WEEKLY TREND</Text>
+        </View>
+        <WeeklyTrendChart weeklySeries={dbStore.weeklySeries} />
+
+        {/* ── SECTION: Defect Distribution ─────────────────────────── */}
+        {/* Mirrors _refresh_pie_chart() */}
+        <View style={styles.sectionHeader}>
+          <Activity size={13} color={Colors.accent} />
+          <Text style={styles.sectionTitle}>DEFECT DISTRIBUTION</Text>
+        </View>
+        <DefectPieChart distribution={dbStore.defectDistribution} />
+
+        {/* ── SECTION: Daily Defect Trend ─────────────────────────── */}
+        {/* Mirrors _refresh_bar_chart() */}
+        <View style={styles.sectionHeader}>
+          <TrendingDown size={13} color={Colors.accent} />
+          <Text style={styles.sectionTitle}>DAILY DEFECT COUNT</Text>
+          <Badge label="7-DAY" color={Colors.accent} size="sm" />
+        </View>
+        <View style={styles.chartCard}>
+          <LineChart
+            data={MOCK_LINE_CHART_DATA}
+            width={SW - 64}
+            height={160}
+            chartConfig={CHART_CONFIG}
+            bezier
+            withShadow={false}
+            style={styles.lineChart}
+          />
         </View>
 
-        {/* Bar chart by defect class */}
+        {/* ── SECTION: Defect By Type (Bar) ────────────────────────── */}
         <DefectChart
           title="Defect Frequency by Type"
-          data={MOCK_DEFECT_DISTRIBUTION.map((d) => ({ label: d.name, value: d.count, color: d.color }))}
+          data={MOCK_DEFECT_DISTRIBUTION.map((d) => ({
+            label: d.name,
+            value: d.count,
+            color: d.color,
+          }))}
         />
 
-        {/* Production Summary */}
-        <View style={[styles.sectionCard, { marginTop: 12 }]}>
-          <Text style={styles.chartTitle}>WEEKLY SUMMARY</Text>
-          <View style={styles.summaryGrid}>
-            <SummaryItem label="PCBs Inspected" value="2,030" color={Colors.accent} />
-            <SummaryItem label="Defective PCBs" value="254" color={Colors.danger} />
-            <SummaryItem label="Avg. Defect Rate" value="12.5%" color={Colors.warning} />
-            <SummaryItem label="AI Accuracy" value="96.4%" color={Colors.success} />
-          </View>
+        {/* ── SECTION: Detection Log ──────────────────────────────── */}
+        {/* Mirrors _refresh_log_table() — severity-colored rows */}
+        <View style={styles.sectionHeader}>
+          <Clock size={13} color={Colors.accent} />
+          <Text style={styles.sectionTitle}>DETECTION LOG</Text>
+          <Badge
+            label={`${filteredLogs.length} entries`}
+            color={Colors.textSecondary}
+            size="sm"
+          />
         </View>
-
-        {/* Production Logs */}
-        <View style={styles.logSection}>
-          <View style={styles.chartHeader}>
-            <Text style={styles.chartTitle}>PRODUCTION LOGS</Text>
-            <Badge label={`${filteredLogs.length} entries`} color={Colors.textSecondary} size="sm" />
-          </View>
-          <ProductionLogTable logs={filteredLogs} />
-        </View>
+        <DetectionLogTable logs={filteredLogs} limit={30} />
 
         <View style={styles.bottomPad} />
       </ScrollView>
@@ -209,15 +274,9 @@ export default function StatisticsScreen() {
   );
 }
 
-const SummaryItem = ({ label, value, color }: { label: string; value: string; color: string }) => (
-  <View style={styles.summaryItem}>
-    <Text style={[styles.summaryValue, { color }]}>{value}</Text>
-    <Text style={styles.summaryLabel}>{label}</Text>
-  </View>
-);
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: Colors.bgDeep },
+
   header: {
     backgroundColor: Colors.bgSurface,
     borderBottomWidth: 1,
@@ -229,50 +288,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingTop: 12,
-    paddingBottom: 10,
+    paddingBottom: 8,
   },
   screenTitle: { fontSize: 18, fontWeight: '800', color: Colors.textPrimary },
   screenSub: { fontSize: 11, color: Colors.textMuted, marginTop: 2 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   refreshBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 9,
     backgroundColor: Colors.bgCard,
     borderWidth: 1,
     borderColor: Colors.border,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  filterRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingBottom: 10,
-    gap: 10,
-  },
-  dateRangePicker: {
-    flexDirection: 'row',
-    backgroundColor: Colors.bgCard,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    overflow: 'hidden',
-    flex: 1,
-  },
-  rangeBtn: { flex: 1, paddingVertical: 8, alignItems: 'center' },
-  rangeBtnActive: { backgroundColor: Colors.accent },
-  rangeBtnText: { fontSize: 12, fontWeight: '600', color: Colors.textMuted },
-  rangeBtnTextActive: { color: '#fff', fontWeight: '800' },
-  filterIconBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: Colors.bgCard,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  rangeRow: { paddingHorizontal: 16, paddingBottom: 10 },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -285,24 +316,42 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     gap: 8,
   },
-  searchIcon: {},
-  searchInput: {
-    flex: 1,
-    height: 38,
-    color: Colors.textPrimary,
-    fontSize: 13,
-  },
+  searchInput: { flex: 1, height: 36, color: Colors.textPrimary, fontSize: 12 },
+
   scroll: { flex: 1 },
-  kpiGrid: {
+
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
+  sectionTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: Colors.textMuted,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+  },
+  sectionSub: {
+    fontSize: 9,
+    color: Colors.textMuted,
+    marginLeft: 4,
+    fontStyle: 'italic',
+  },
+
+  metricsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
-    padding: 16,
-    paddingBottom: 0,
+    paddingHorizontal: 16,
   },
-  chartSection: {
-    margin: 16,
-    marginBottom: 0,
+  metricCard: { minWidth: '45%' },
+
+  chartCard: {
+    marginHorizontal: 16,
     backgroundColor: Colors.bgCard,
     borderRadius: 16,
     borderWidth: 1,
@@ -310,33 +359,7 @@ const styles = StyleSheet.create({
     padding: 16,
     overflow: 'hidden',
   },
-  chartHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  chartTitle: { fontSize: 11, fontWeight: '700', color: Colors.textMuted, letterSpacing: 1, textTransform: 'uppercase' },
-  totalCount: { fontSize: 12, color: Colors.textSecondary, fontWeight: '600' },
   lineChart: { borderRadius: 12, marginLeft: -16 },
-  sectionCard: {
-    margin: 16,
-    marginBottom: 0,
-    backgroundColor: Colors.bgCard,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    padding: 16,
-  },
-  summaryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 12,
-  },
-  summaryItem: { width: '47%', alignItems: 'center', paddingVertical: 10 },
-  summaryValue: { fontSize: 22, fontWeight: '800', marginBottom: 4 },
-  summaryLabel: { fontSize: 10, color: Colors.textMuted, textAlign: 'center', fontWeight: '500' },
-  logSection: { margin: 16, marginBottom: 0, gap: 10 },
+
   bottomPad: { height: 32 },
 });
